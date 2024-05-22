@@ -9,6 +9,7 @@
 library(pasilla)
 library(DESeq2)
 library(ggplot2)
+library(matrixStats)
 
 
 ####################################################
@@ -28,6 +29,7 @@ metaFilePath <- system.file(
     mustWork=TRUE
 )
 cntMat <- as.matrix(read.csv(cntFilePath, sep = "\t", row.names = "gene_id"))
+cntMat <- cntMat[rowSums(cntMat > 0) >= 3, ]
 metaDat <- read.csv(metaFilePath, row.names = 1)
 metaDat$condition <- factor(metaDat$condition)
 metaDat$type <- factor(metaDat$type)
@@ -39,12 +41,6 @@ print(metaDat)
 #################################
 ## Quick-start simple analysis ##
 #################################
-# Re-format condition as a factor type #
-metaDat$type <- factor(
-    x = as.character(metaDat$type),
-    levels = c("untreated", "treated")
-)
-
 # Match rows of meta data against columns of cntMat #
 rownames(metaDat) <- gsub("fb", "", rownames(metaDat))
 all(rownames(metaDat) %in% colnames(cntMat))
@@ -70,12 +66,14 @@ plotMA(dds_quickStart)
 ##################################
 # Factors by library size: Reads per million #
 rpmSF <- colSums(cntMat) / 1e6
+normMat_rpm <- t(t(cntMat) / rpmSF)
 
 # Factors by Median-of-Ratios #
 filterCnts <- cntMat[rowSums(cntMat <= 5) == 0, ]
 dim(filterCnts)
 filterGeoMeans <- exp(rowMeans(log(filterCnts)))
 mrSF <- as.numeric(apply(filterCnts / filterGeoMeans, 2, median))
+normMat_mr <- t(t(cntMat) / mrSF)
 
 # Factors calculated by default #
 defaultSF <- sizeFactors(dds_quickStart)
@@ -100,10 +98,7 @@ legend("topleft", legend = c("RPM", "MR"), col = c("red", "blue"), lty = 1:2)
 
 # Visualize normalization quality #
 normDat <- data.frame(
-    normExpr = c(
-        as.numeric(t(t(cntMat) / rpmSF)),
-        as.numeric(t(t(cntMat) / mrSF))
-    ),
+    normExpr = c(as.numeric(normMat_rpm), as.numeric(normMat_mr)),
     normMethod = rep(
         c("RPM", "MR"),
         rep(prod(dim(cntMat)), 2)
@@ -169,5 +164,233 @@ plotDispEsts(dds_MR)
 # Dispersion plot: RPM #
 plotDispEsts(dds_RPM)
 
+# Visualize mean-variance relationship #
+meanVarDat <- data.frame(
+    meanVals = c(
+        rowMeans(cntMat),
+        rowMeans(normMat_mr),
+        rowMeans(normMat_rpm)
+    ),
+    varVals = c(
+        rowVars(cntMat),
+        rowVars(normMat_mr),
+        rowVars(normMat_rpm)
+    ),
+    normType = factor(
+        rep(c("unnormalized", "mr", "rpm"), each = nrow(cntMat)),
+        levels = c("unnormalized", "mr", "rpm"), ordered = TRUE
+    )
+)
+fitDat <- data.frame(
+    x = exp(seq(0, log(max(meanVarDat$meanVals)), length = 400))
+)
+fitDat$y1 <- fitDat$x + 0.01 * fitDat$x ^ 2
+fitDat$y2 <- fitDat$x + 0.1 * fitDat$x ^ 2
+meanVarPlot <- ggplot(
+    meanVarDat, aes(x = meanVals, y = varVals, col = normType)
+) + 
+    theme_classic() + 
+    facet_grid(. ~ normType) + 
+    geom_point(size = 0.5) + 
+    geom_abline(slope = 1, intercept = 0, lty = 1) + 
+    geom_line(data = fitDat, aes(x = x, y = y1), lty = 2, inherit.aes = FALSE) +
+    geom_line(data = fitDat, aes(x = x, y = y2), lty = 3, inherit.aes = FALSE) +
+    scale_x_continuous(
+        trans = "sqrt", 
+        breaks = round(((0:10) * 50) ^ 2),
+        limits = c(0, quantile(meanVarDat$meanVals, 0.995))
+    ) + 
+    scale_y_continuous(
+        trans = "sqrt", 
+        breaks = round(((0:10) * 1e3) ^ 2),
+        limits = c(0, quantile(meanVarDat$varVals, 0.995))
+    ) + 
+    labs(
+        x = "Gene means", y = "Gene vars.",
+        title = "Mean-variance relationship",
+        subtitle = "Dashed line: phi = 0.01 -- dotted line: phi = 0.1 -- solid line: mean = var"
+    ) +
+    theme(
+        legend.position = "none",
+        axis.text.x = element_text(angle = -25)
+    )
+meanVarPlot
+
+meanVarPlot_Log <- ggplot(
+    meanVarDat, aes(x = meanVals, y = varVals, col = normType)
+) + 
+    theme_classic() + 
+    facet_grid(. ~ normType) + 
+    geom_point(size = 0.5) + 
+    geom_abline(slope = 1, intercept = 0, lty = 1) + 
+    geom_line(data = fitDat, aes(x = x, y = y1), lty = 2, inherit.aes = FALSE) +
+    geom_line(data = fitDat, aes(x = x, y = y2), lty = 3, inherit.aes = FALSE) +
+    scale_x_continuous(
+        trans = "log1p", 
+        breaks = c(1, 1e2, 1e4, 1e6, 1e8),
+        limits = c(0, quantile(meanVarDat$meanVals, 0.995))
+    ) + 
+    scale_y_continuous(
+        trans = "log1p", 
+        breaks = 10 ^ (0:10),
+        limits = c(0, quantile(meanVarDat$varVals, 0.995))
+    ) + 
+    labs(
+        x = "Gene means", y = "Gene vars.",
+        title = "Mean-variance relationship",
+        subtitle = "Dashed line: phi = 0.01 -- dotted line: phi = 0.1 -- solid line: mean = var"
+    ) +
+    theme(
+        legend.position = "none",
+        axis.text.x = element_text(angle = -25)
+    )
+meanVarPlot_Log
+
+plot(
+    x = log1p(rowMeans(rpmNorm)),
+    y = log1p(rowVars(rpmNorm)) - log1p(rowMeans(rpmNorm)),
+    pch = 19, cex = 0.25,
+    xlab = "gene means (log1p)", ylab = "gene var - gene mean (log1p)"
+)
+abline(h = 0, lty = 2, col = 2)
+mean(log1p(rowVars(rpmNorm)) - log1p(rowMeans(rpmNorm)) < 0)
+
+# Re-normalize relative to library size #
+rpmScale <- rpmSF / exp(mean(log(rpmSF)))
+rpmScale
+scaleNorm <- t(t(cntMat) / rpmScale)
+
+# DESeq Analysis: re-scaled RPM #
+dds_scaleRPM <- DESeqDataSetFromMatrix(
+    countData = round(cntMat),
+    colData = metaDat,
+    design = ~ condition
+)
+sizeFactors(dds_scaleRPM) <- rpmScale
+dds_scaleRPM <- DESeq(dds_scaleRPM)
+head(results(dds_scaleRPM))
+plotMA(dds_scaleRPM)
+plotDispEsts(dds_scaleRPM)
+
+
+#################################
+## Design matrix and contrasts ##
+#################################
+# Default model matrix #
+model.matrix(~ condition, metaDat)
+
+# Default coefficients #
+resultsNames(dds_quickStart)
+quickStartRes <- results(dds_quickStart)
+head(quickStartRes)
+
+# Specifying comparison through contrasts #
+dds_Simple <- DESeqDataSetFromMatrix(
+    countData = round(cntMat),
+    colData = metaDat,
+    design = ~ condition - 1
+)
+dds_Simple <- DESeq(dds_Simple)
+resultsNames(dds_Simple)
+?results
+simpleRes1 <- results(
+    dds_Simple, 
+    contrast = c("condition", "treated", "untreated")
+)
+head(simpleRes1)
+simpleRes2 <- results(
+    dds_Simple, 
+    contrast = list(
+        c("conditiontreated"),
+        c("conditionuntreated")
+    )
+)
+head(simpleRes2)
+simpleRes3 <- results(
+    dds_Simple, 
+    contrast = c(1,-1)
+)
+head(simpleRes3)
+
+# Full model #
+model.matrix(~ condition + type - 1, data = metaDat)
+dds_Full <- DESeqDataSetFromMatrix(
+    countData = round(cntMat),
+    colData = metaDat,
+    design = ~ condition + type - 1
+)
+dds_Full <- DESeq(dds_Full)
+resultsNames(dds_Full)
+resTrtUnt <- results(
+    dds_Full,
+    contrast = list(
+        c("conditiontreated"),
+        c("conditionuntreated")
+    )
+)
+head(resTrtUnt)
+resEndBias <- results(
+    dds_Full,
+    name = "typesingle.read"
+)
+head(resEndBias[order(resEndBias$padj), ])
+
+
+##########################
+## Shrinkage correction ##
+##########################
+# ashr contrast treated against untreated #
+shrunkTrtUnt <- lfcShrink(
+    dds_Full,
+    contrast = list(
+        c("conditiontreated"),
+        c("conditionuntreated")
+    ),
+    type = "ashr",
+    svalue = TRUE
+)
+head(shrunkTrtUnt)
+
+# Check genes with zeros in one group #
+zeroGenes <- which(rowSums(cntMat[, 1:3]) == 0 | rowSums(cntMat[, 4:7]) == 0)
+shrunkTrtUnt[head(zeroGenes), ]
+cntMat[head(zeroGenes), ]
+
+# apeglm untreated against treated #
+apeUntTrt <- lfcShrink(
+    dds_quickStart,
+    coef = "condition_untreated_vs_treated",
+    type = "apeglm",
+    svalue = TRUE
+)
+head(apeUntTrt)
+
+# apeglm treated against untreated #
+metaDat$condition <- relevel(metaDat$condition, "untreated")
+dds_Relevel <- DESeqDataSetFromMatrix(
+    countData = round(cntMat),
+    colData = metaDat,
+    design = ~ condition
+)
+dds_Relevel <- DESeq(dds_Relevel)
+resultsNames(dds_Relevel)
+apeTrtUnt <- lfcShrink(
+    dds_Relevel,
+    coef = "condition_treated_vs_untreated",
+    type = "apeglm",
+    svalue = TRUE
+)
+head(apeTrtUnt)
+
+# ashr vs apeglm #
+plot(
+    x = -log10(shrunkTrtUnt$svalue),
+    y = -log10(apeTrtUnt$svalue),
+    pch = 19, cex = 0.25, 
+    xlab = "apeglm s-value (-log10)",
+    ylab = "ashr s-value (-log10)",
+    xlim = c(0, 50), ylim = c(0, 50)
+)
+abline(0, 1, col = 2, lty = 2)
 
 
